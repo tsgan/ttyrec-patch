@@ -1,0 +1,1366 @@
+Common subdirectories: ttyrec/.git and ttyrec-mod/.git
+diff -uwN ttyrec/Makefile ttyrec-mod/Makefile
+--- ttyrec/Makefile	2017-09-19 11:05:54.000000000 +0900
++++ ttyrec-mod/Makefile	2017-09-20 11:44:22.681482000 +0900
+@@ -1,16 +1,20 @@
+-CC = gcc
+-CFLAGS = -O2
++CC = cc
++CFLAGS = -DHAVE_openpty
++LDFLAGS = -lcrypto -lutil
+ VERSION = 1.0.8
+ 
+-TARGET = ttyrec ttyplay ttytime
++TARGET = ttyrec ttyplay ttytime ttydecrypt
+ 
+-DIST =	ttyrec.c ttyplay.c ttyrec.h io.c io.h ttytime.c\
++DIST =	ttyrec.c ttyplay.c ttyrec.h ssl.c ssl.h io.c io.h ttytime.c ttydecrypt.c ttyw-play\
+ 	README Makefile ttyrec.1 ttyplay.1 ttytime.1
+ 
+ all: $(TARGET)
+ 
+-ttyrec: ttyrec.o io.o
+-	$(CC) $(CFLAGS) -o ttyrec ttyrec.o io.o
++ttydecrypt: ttydecrypt.o io.o ssl.o
++	$(CC) $(CFLAGS) -o ttydecrypt ttydecrypt.o io.o ssl.o $(LDFLAGS)
++
++ttyrec: ttyrec.o io.o ssl.o
++	$(CC) $(CFLAGS) -o ttyrec ttyrec.o io.o ssl.o $(LDFLAGS)
+ 
+ ttyplay: ttyplay.o io.o
+ 	$(CC) $(CFLAGS) -o ttyplay ttyplay.o io.o
+diff -uwN ttyrec/io.c ttyrec-mod/io.c
+--- ttyrec/io.c	2017-09-19 11:05:54.000000000 +0900
++++ ttyrec-mod/io.c	2017-09-20 11:25:11.000000000 +0900
+@@ -39,6 +39,7 @@
+ #include <unistd.h>
+ 
+ #include "ttyrec.h"
++#include "ssl.h"
+ 
+ #define SWAP_ENDIAN(val) ((unsigned int) ( \
+     (((unsigned int) (val) & (unsigned int) 0x000000ffU) << 24) | \
+@@ -65,16 +66,17 @@
+ 	}
+     }
+ 
+-    return retval;
++	return (retval);
+ }
+ 
+ static int
+ convert_to_little_endian (int x)
+ {
++
+     if (is_little_endian()) {
+-	return x;
++		return (x);
+     } else {
+-	return SWAP_ENDIAN(x);
++		return (SWAP_ENDIAN(x));
+     }
+ }
+ 
+@@ -84,14 +86,14 @@
+     int buf[3];
+ 
+     if (fread(buf, sizeof(int), 3, fp) == 0) {
+-	return 0;
++		return (0);
+     }
+ 
+     h->tv.tv_sec  = convert_to_little_endian(buf[0]);
+     h->tv.tv_usec = convert_to_little_endian(buf[1]);
+     h->len        = convert_to_little_endian(buf[2]);
+ 
+-    return 1;
++	return (1);
+ }
+ 
+ int
+@@ -104,16 +106,18 @@
+     buf[2] = convert_to_little_endian(h->len);
+ 
+     if (fwrite(buf, sizeof(int), 3, fp) == 0) {
+-	return 0;
++		return (0);
+     }
+ 
+-    return 1;
++	return (1);
+ }
+ 
+ static char *progname = "";
++
+ void
+ set_progname (const char *name)
+ {
++
+     progname = strdup(name);
+ }
+ 
+@@ -125,7 +129,7 @@
+ 	fprintf(stderr, "%s: %s: %s\n", progname, path, strerror(errno));
+ 	exit(EXIT_FAILURE);
+     }
+-    return fp;
++	return (fp);
+ }
+ 
+ int
+@@ -136,7 +140,7 @@
+ 	fprintf(stderr, "%s: dup failed: %s\n", progname, strerror(errno));
+ 	exit(EXIT_FAILURE);
+     }
+-    return fd;
++	return (fd);
+ }
+ 
+ int
+@@ -147,7 +151,7 @@
+ 	fprintf(stderr, "%s: dup2 failed: %s\n", progname, strerror(errno));
+ 	exit(EXIT_FAILURE);
+     }
+-    return fd;
++	return (fd);
+ }
+ 
+ FILE *
+@@ -158,4 +162,5 @@
+ 	fprintf(stderr, "%s: fdopen failed: %s\n", progname, strerror(errno));
+ 	exit(EXIT_FAILURE);
+     }
++	return (fp);
+ }
+diff -uwN ttyrec/io.h ttyrec-mod/io.h
+--- ttyrec/io.h	2017-09-19 11:05:54.000000000 +0900
++++ ttyrec-mod/io.h	2017-09-20 11:53:00.019086000 +0900
+@@ -2,6 +2,7 @@
+ #define __TTYREC_IO_H__
+ 
+ #include "ttyrec.h"
++#include "ssl.h"
+ 
+ int     read_header     (FILE *fp, Header *h);
+ int     write_header    (FILE *fp, Header *h);
+@@ -9,5 +10,6 @@
+ int     edup            (int oldfd);
+ int     edup2           (int oldfd, int newfd);
+ FILE*   efdopen         (int fd, const char *mode);
++void	set_progname (const char *name);
+ 
+ #endif
+diff -uwN ttyrec/ssl.c ttyrec-mod/ssl.c
+--- ttyrec/ssl.c	1970-01-01 07:00:00.000000000 +0700
++++ ttyrec-mod/ssl.c	2017-05-19 08:42:34.000000000 +0900
+@@ -0,0 +1,126 @@
++/*
++ * Copyright (c) 2017 Ganbold Tsagaankhuu <ganbold@gmail.org>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *      This product includes software developed by the University of
++ *      California, Berkeley and its contributors.
++ * 4. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include "ssl.h"
++
++int padding = RSA_PKCS1_PADDING;
++
++void
++printLastError(char *msg)
++{
++	char *err = malloc(130);
++	ERR_load_crypto_strings();
++	ERR_error_string(ERR_get_error(), err);
++	printf("%s ERROR: %s\n", msg, err);
++	free(err);
++}
++
++void
++encKey(unsigned char *key, char *filename, char *pubkey_file)
++{
++	EVP_PKEY *pubkey;
++	RSA *rsakey;
++	FILE *f, *fp;
++	int encrypted_length;
++	int decrypted_length;
++	int i;
++	unsigned char encrypted[4098] = {};
++	unsigned char decrypted[4098] = {};
++	char plainText[64];
++
++	/* key encryption part */
++	if ((f = fopen(filename, "w")) == NULL) {
++		fprintf (stderr, "fopen error\n");
++		exit (1);
++	}
++	pubkey = EVP_PKEY_new();
++
++	if ((fp = fopen (pubkey_file, "r")) == NULL) {
++		fprintf (stderr, "cert fopen error\n");
++		exit (1);
++	}
++	if (PEM_read_PUBKEY(fp, &pubkey, NULL, NULL) == NULL ) {
++		fprintf (stderr, "pubkey read error\n");
++		exit (1);
++	}
++	if (pubkey == NULL) {
++		fprintf (stderr, "pubkey error\n");
++		exit (1);
++	}
++	fclose(fp);
++
++	rsakey = EVP_PKEY_get1_RSA(pubkey);
++	if (rsakey == NULL) {
++		fprintf (stderr, "rsakey error\n");
++		exit (1);
++	}
++	encrypted_length = RSA_public_encrypt(strlen((const char *)key), (unsigned char *)key, encrypted, rsakey, padding);
++	if(encrypted_length == -1)
++	{
++		printLastError("Public Encrypt failed 1 ");
++		exit(0);
++	}
++
++	fwrite(encrypted, 1, encrypted_length, f);
++
++	fclose(f);
++
++	/* Freeing things */
++	RSA_free(rsakey);
++	EVP_PKEY_free(pubkey);
++}
++
++int
++init_ctr(struct ctr_state *state, const unsigned char iv[16])
++{
++	/* aes_ctr128_encrypt requires 'num' and 'ecount' set to zero on the
++	 * first call. */
++	state->num = 0;
++	memset(state->ecount, 0, AES_BLOCK_SIZE);
++
++	/* Initialise counter in 'ivec' to 0 */
++	memset(state->ivec + 8, 0, 8);
++
++	/* Copy IV into 'ivec' */
++	memcpy(state->ivec, iv, 8);
++	return (0);
++}
++
++void
++fencrypt(char *inbuf, int bytes_read, FILE *fp, int size)
++{
++
++	AES_ctr128_encrypt((unsigned char *)inbuf, outdata, bytes_read, &key, state.ivec, state.ecount, &state.num);
++
++	fwrite(outdata, size, bytes_read, fp);
++}
+diff -uwN ttyrec/ssl.h ttyrec-mod/ssl.h
+--- ttyrec/ssl.h	1970-01-01 07:00:00.000000000 +0700
++++ ttyrec-mod/ssl.h	2017-09-20 11:53:14.629247000 +0900
+@@ -0,0 +1,39 @@
++#ifndef __TTYREC_SSL_H__
++#define	__TTYREC_SSL_H__
++
++#include <openssl/pem.h>
++#include <openssl/ssl.h>
++#include <openssl/rsa.h>
++#include <openssl/evp.h>
++#include <openssl/bio.h>
++#include <openssl/err.h>
++#include <openssl/aes.h>
++#include <openssl/rand.h>
++#include <openssl/hmac.h>
++#include <openssl/buffer.h>
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <math.h>
++
++struct ctr_state
++{
++	unsigned char ivec[AES_BLOCK_SIZE];
++	unsigned int num;
++	unsigned char ecount[AES_BLOCK_SIZE];
++};
++
++AES_KEY key;
++
++int bytes_read, bytes_written;
++unsigned char indata[4096];
++unsigned char outdata[4096];
++struct ctr_state state;
++
++void	printLastError(char *);
++void	encKey(unsigned char *, char *, char *);
++
++int	init_ctr(struct ctr_state *state, const unsigned char iv[16]);
++void	fencrypt(char *inbuf, int bytes_read, FILE *fp, int size);
++
++#endif
+diff -uwN ttyrec/ttydecrypt.c ttyrec-mod/ttydecrypt.c
+--- ttyrec/ttydecrypt.c	1970-01-01 07:00:00.000000000 +0700
++++ ttyrec-mod/ttydecrypt.c	2017-05-18 16:43:52.000000000 +0900
+@@ -0,0 +1,132 @@
++#ifdef HAVE_CAPSICUM
++#include <sys/capsicum.h>
++#include <capsicum_helpers.h>
++#endif
++#include <assert.h>
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "io.h"
++#include "ssl.h"
++
++FILE *readFile;
++FILE *writeFile;
++
++int bytes_read, bytes_written;
++unsigned char indata[4096];
++unsigned char outdata[4096];
++unsigned char iv[AES_BLOCK_SIZE];
++struct ctr_state state;
++
++int
++ttyread (FILE *fp, Header *h, char **buf)
++{
++	fpos_t pos;
++	int can_seek=0;
++	if (fgetpos(fp, &pos) == 0) {
++		can_seek=1;
++	}
++	clearerr(fp);
++
++	if (read_header(fp, h) == 0) {
++		goto err;
++	}
++
++	*buf = malloc(h->len);
++	if (*buf == NULL) {
++		perror("malloc");
++	}
++
++	if (fread(*buf, 1, h->len, fp) == 0) {
++		goto err;
++	}
++	return (1);
++
++err:
++	if (ferror(fp)) {
++		perror("fread");
++	} else {
++		/* Short read. Seek back to before header, to set up for retry. */
++		if (can_seek) {
++			fsetpos(fp, &pos);
++		}
++	}
++	return (0);
++}
++
++void
++fdecrypt(const unsigned char* enc_key)
++{
++	AES_KEY key;
++	Header h;
++
++	fread(iv, 1, AES_BLOCK_SIZE, readFile);
++
++	/* Initializing the encryption KEY */
++	if (AES_set_encrypt_key(enc_key, 128, &key) < 0)
++	{
++		fprintf(stderr, "Could not set decryption key.");
++		exit(1);
++	}
++
++	init_ctr(&state, iv);/* Counter call */
++	/* Encrypting Blocks of 16 bytes and writing the output.txt with ciphertext */
++
++	while(1) {
++		char *buf;
++		Header h;
++
++		if (ttyread(readFile, &h, &buf) == 0) {
++			break;
++		}
++		write_header(writeFile, &h);
++
++		AES_ctr128_encrypt((unsigned char *)buf, outdata, h.len, &key, state.ivec, state.ecount, &state.num);
++		fwrite(outdata, 1, h.len, writeFile);
++		free(buf);
++	}
++	fclose(writeFile);
++	fclose(readFile);
++}
++
++int main(int argc, char *argv[])
++{
++#ifdef HAVE_CAPSICUM
++	cap_rights_t rights;
++#endif
++	readFile = fopen(argv[1], "rb");
++	writeFile = fopen("ttyrec-dec.txt", "wb");
++
++	if(readFile == NULL) {
++		fprintf(stderr,"Read file is null.");
++		exit(1);
++	}
++
++	if(writeFile == NULL) {
++		fprintf(stderr, "Write file is null.");
++		exit(1);
++	}
++
++#ifdef HAVE_CAPSICUM
++	if (caph_limit_stdio() < 0)
++		fprintf(stderr, "unable to limit capabitilities for stdio");
++
++	cap_rights_init(&rights, CAP_READ, CAP_WRITE, CAP_FSTAT, CAP_SEEK);
++
++	if (cap_rights_limit(fileno(readFile), &rights) < 0 || cap_rights_limit(fileno(writeFile), &rights) < 0)
++		fprintf(stderr, "cap_right_limits failed");
++
++	caph_cache_catpages();
++	caph_cache_tzdata();
++
++	if (cap_enter() < 0 && errno != ENOSYS)
++		fprintf(stderr, "cap_enter: %s\n", strerror(errno));
++#endif
++
++	fdecrypt((unsigned const char*)argv[2]);
++	return (0);
++}
++
+diff -uwN ttyrec/ttyrec.1 ttyrec-mod/ttyrec.1
+--- ttyrec/ttyrec.1	2017-09-19 11:05:54.000000000 +0900
++++ ttyrec-mod/ttyrec.1	2017-09-20 11:27:18.000000000 +0900
+@@ -7,23 +7,24 @@
+ .SH SYNOPSIS
+ .br
+ .B ttyrec
+-.I "[\-a][\-u] [file]"
++.I "[\-a] [\-f] [\-u] [\-e command] [\-l limit] [\-s sftp_server_path] -p public_key_file [directory]"
+ .br
+ .SH DESCRIPTION
+-.B Ttyrec
+-is a tty recorder.
++.B ttyrec
++is an improved tty recorder.
+ It is a derivative of
+ .BR script (1)
+ command for recording timing information with microsecond accuracy as well.
+ It can record emacs -nw, vi, lynx, or any programs running on tty.
+ .PP
+-.B Ttyrec
++.B ttyrec
+ invokes a shell and records the session until the shell exits.
+-Recorded data can be played back with
++Recorded data is encrypted on the fly with AES-CTR.
++Recorded data first should be decrypted with ttydecrypt and then can be played back with
+ .BR ttyplay (1).
+ If the argument
+-.I file
+-is given, the session will be recorded in that file.
++.I directory
++is given, the session will be recorded in that directory.
+ Otherwise,
+ .I ttyrecord
+ is used as default.
+@@ -31,11 +32,14 @@
+ .TP
+ .B \-a
+ Append the output to
+-.I file
+-or
++.I directory
++as host-YYYY-MM-DD_HHhMMmSSs-user.ttyrec file or
+ .IR ttyrecord ,
+ rather than overwriting it.
+ .TP
++.B \-f
++Instead of failing, try hard to just run a shell without recording.
++.TP
+ .B \-u
+ With this option,
+ .B ttyrec
+@@ -54,10 +58,16 @@
+ Invoke 
+ .I command
+ when ttyrec starts.
+-
+-
+-.SH ENVIRONMENT
+ .TP
++.BI \-l " limit"
++Only log the first limit bytes of each second.
++.TP
++.BI \-s " sftp_server_path"
++Set SFTP server path.
++.TP
++.BI \-p " public_key_file"
++Use public key file.
++.SH ENVIRONMENT
+ .I SHELL
+ If the variable
+ .I SHELL
+diff -uwN ttyrec/ttyrec.c ttyrec-mod/ttyrec.c
+--- ttyrec/ttyrec.c	2017-09-19 11:05:54.000000000 +0900
++++ ttyrec-mod/ttyrec.c	2017-09-25 14:19:03.101463000 +0900
+@@ -31,7 +31,7 @@
+  * SUCH DAMAGE.
+  */
+ 
+-/* 1999-02-22 Arkadiusz Mi¶kiewicz <misiek@misiek.eu.org>
++/* 1999-02-22 Arkadiusz Mi?kiewicz <misiek@misiek.eu.org>
+  * - added Native Language Support
+  */
+ 
+@@ -39,22 +39,41 @@
+  * - modify `script' to create `ttyrec'.
+  */
+ 
++/* 2012-10-03 Antoine Amarilli <a3nm@a3nm.net>
++ * - add -f and -l
++ */
++
++/* 2017-04-17 Ganbold Tsagaankhuu <ganbold@freebsd.org>
++ * - added utmpx/utx related operations
++ *   this is helpful when using w command to see
++ *   latest command that user run
++ * - used setproctitle() to set to process a shorter title
++ * - s switch to get sftp program
++ * - log file name format: host-YYYY-MM-DD_HHhMMmSSs-user.ttyrec
++ * - added ssh command handling
++ * - drop root privileges
++ * - add log encryption -> aes-ctr
++ */
++
+ /*
+  * script
+  */
++#include <sys/param.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <termios.h>
+ #include <sys/ioctl.h>
+ #include <sys/time.h>
+ #include <sys/file.h>
+-#include <sys/signal.h>
++#include <signal.h>
+ #include <stdio.h>
+ #include <time.h>
+ #include <unistd.h>
+ #include <string.h>
+ #include <stdlib.h>
+ 
++#include <utmpx.h>
++
+ #if defined(SVR4)
+ #include <fcntl.h>
+ #include <stropts.h>
+@@ -63,6 +82,7 @@
+ #include <sys/time.h>
+ #include "ttyrec.h"
+ #include "io.h"
++#include "ssl.h"
+ 
+ #define HAVE_inet_aton
+ #define HAVE_scsi_h
+@@ -71,6 +91,7 @@
+ #define _(FOO) FOO
+ 
+ #ifdef HAVE_openpty
++//#include <pty.h>  /* for openpty and forkpty */
+ #include <libutil.h>
+ #endif
+ 
+@@ -92,6 +113,14 @@
+ void doinput(void);
+ void dooutput(void);
+ void doshell(const char*);
++void	spawnshell();
++void	runcommand(char *);
++void	dowrites(Header, int, char*);
++char	*make_id(char *);
++char	*clean_ttyname(char *);
++void	utmpx_update();
++void	drop_priv();
++void	restore_priv();
+ 
+ char	*shell;
+ FILE	*fscript;
+@@ -100,6 +129,8 @@
+ int	child;
+ int	subchild;
+ char	*fname;
++char	*kname;
++char	*dname;
+ 
+ struct	termios tt;
+ struct	winsize win;
+@@ -112,19 +143,58 @@
+ #endif /* !SVR4 */
+ int	aflg;
+ int	uflg;
++int	force;
++int	limit;
++char	*command;
++char	*sftp = NULL;
++char	*ssh_command = NULL;
++char	*pubkey_file;
++
++unsigned char rawkey[8];
++unsigned char rkey[16];
++
++unsigned char iv[AES_BLOCK_SIZE];
++
++#ifndef _PATH_DEV
++#define	_PATH_DEV	"/dev/"
++#endif
++
++static int orig_ngroups = -1;
++static gid_t orig_gid = -1;
++static uid_t orig_uid = -1;
++static gid_t orig_groups[NGROUPS_MAX];
++
++static void
++resize(int dummy) {
++
++	/* transmit window change information to the child */
++	(void) ioctl(0, TIOCGWINSZ, (char *)&win);
++	(void) ioctl(master, TIOCSWINSZ, (char *)&win);
++}
+ 
+ int
+-main(argc, argv)
++main(argc, argv, envp)
+ 	int argc;
+ 	char *argv[];
++	char *envp[];
+ {
++	struct sigaction sa;
+ 	extern int optind;
+-	int ch;
++	int ch, i;
+ 	void finish();
+ 	char *getenv();
+-	char *command = NULL;
++	command = NULL;
++	char log_fname[256];
++	char key_fname[256];
++	char *user = NULL;
++	char host[256];
++	FILE *f;
++	char c;
++        Header h;
++
++//	setproctitle_init(argc, argv, envp);
+ 
+-	while ((ch = getopt(argc, argv, "aue:h?")) != EOF)
++	while ((ch = getopt(argc, argv, "aue:fl:s:p:h?")) != EOF)
+ 		switch((char)ch) {
+ 		case 'a':
+ 			aflg++;
+@@ -135,52 +205,175 @@
+ 		case 'e':
+ 			command = strdup(optarg);
+ 			break;
++		case 'f':
++			force = 1;
++			break;
++		case 'l':
++			limit = atoi(optarg);
++			break;
++		case 's':
++			sftp = strdup(optarg);
++			break;
++		case 'p':
++			pubkey_file = strdup(optarg);
++			break;
+ 		case 'h':
+ 		case '?':
+ 		default:
+-			fprintf(stderr, _("usage: ttyrec [-u] [-e command] [-a] [file]\n"));
++			fprintf(stderr,
++				_("usage: ttyrec [-u] [-e command] [-a] "
++				"[-f] [-l limit] [-s sftp_server_path] "
++				"-p public_key_file [directory]\n"));
+ 			exit(1);
+ 		}
+ 	argc -= optind;
+ 	argv += optind;
+ 
+ 	if (argc > 0)
+-		fname = argv[0];
++		dname = argv[0];
+ 	else
+-		fname = "ttyrecord";
++		dname = "/var/rec";
++
++	user = getenv("USER");
++	if (user == NULL)
++		user = "ttyrec";
++
++	shell = getenv("SHELL");
++	if (shell == NULL)
++		shell = "/bin/sh";
++
++	gethostname(host, 256);
++
++	time_t t = time(NULL);
++	struct tm *tm = localtime(&t);
++
++	snprintf(key_fname, 256,
++		"%s/%s-%d-%.2d-%.2d_%.2dh%.2dm%.2ds-%s.ttyrec.key", dname, host,
++		tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday, tm->tm_hour,
++		tm->tm_min, tm->tm_sec, user);
++	kname = key_fname;
++
++	if (!(RAND_bytes((unsigned char *)rawkey, 8))) {
++		printf("ERROR: call to RAND_pseudo_bytes() failed\n");
++		exit(1);
++	}
++	for (i = 0; i < 8; i++)
++		snprintf((char *)(rkey + i * 2), 16, "%02X", (int)(rawkey[i]));
++
++	/* Encrypt the key */
++	encKey(rkey, kname, pubkey_file);
++
++	if (!RAND_bytes(iv, AES_BLOCK_SIZE)) {
++		fprintf(stderr, "Could not create random bytes.");
++		exit(1);
++	}
++	/* Initializing the encryption KEY */
++	if (AES_set_encrypt_key(rkey, 128, &key) < 0) {
++		fprintf(stderr, "Could not set encryption key.");
++		exit(1);
++	}
++
++	init_ctr(&state, iv); /* Counter call */
++
++	if (sftp == NULL)
++		sftp = "/usr/libexec/sftp-server";
++
++	ssh_command = getenv("SSH_ORIGINAL_COMMAND");
++
++	if (ssh_command == NULL) {
++		goto runshell;
++	} else if (strncmp(ssh_command, "internal-sftp", 256) == 0) {
++		drop_priv();
++		runcommand(sftp);
++	} else if (strncmp(ssh_command, sftp, 256) == 0) {
++		drop_priv();
++		runcommand(sftp);
++	} else {
++		/* log command to file */
++		snprintf(log_fname, 256,
++			"%s/%s-%d-%.2d-%.2d_%.2dh%.2dm%.2ds-%s.cmd", dname, host,
++			tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday, tm->tm_hour,
++			tm->tm_min, tm->tm_sec, user);
++		fname = log_fname;
+ 	if ((fscript = fopen(fname, aflg ? "a" : "w")) == NULL) {
+-		perror(fname);
++			if (!force) perror(fname);
+ 		fail();
+ 	}
+ 	setbuf(fscript, NULL);
+ 
+-	shell = getenv("SHELL");
+-	if (shell == NULL)
+-		shell = "/bin/sh";
++		drop_priv();
++
++		fwrite(iv, 1, 8, fscript); /* IV bytes 1 - 8 */
++		/* Fill the last 4 with null bytes 9 - 16 */
++		fwrite("\0\0\0\0\0\0\0\0", 1, 8, fscript);
++
++		h.len = strlen(ssh_command);
++		gettimeofday(&h.tv, NULL);
++		dowrites(h, strlen(ssh_command), ssh_command);
++
++		/* fprintf(stderr, "ssh command: %s\n", ssh_command); */
++		fclose(fscript);
++		runcommand(ssh_command);
++	}
++	return (0);
++runshell:
++	f = fopen("/etc/motd", "rt");
++	if (f != NULL) {
++		while((c = fgetc(f)) != EOF)
++			printf("%c", c);
++		fclose(f);
++	}
++
++	snprintf(log_fname, 256,
++		"%s/%s-%d-%.2d-%.2d_%.2dh%.2dm%.2ds-%s.ttyrec", dname, host,
++		tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday, tm->tm_hour,
++		tm->tm_min, tm->tm_sec, user);
++	fname = log_fname;
++	if ((fscript = fopen(fname, aflg ? "a" : "w")) == NULL) {
++		if (!force) perror(fname);
++		fail();
++	}
++	setbuf(fscript, NULL);
++
++	drop_priv();
++
++	fwrite(iv, 1, 8, fscript); /* IV bytes 1 - 8 */
++	/* Fill the last 4 with null bytes 9 - 16 */
++	fwrite("\0\0\0\0\0\0\0\0", 1, 8, fscript);
+ 
+ 	getmaster();
+ 	fixtty();
+ 
+-	(void) signal(SIGCHLD, finish);
++	setproctitle("ssh-rec");
++
++	sigemptyset(&sa.sa_mask);
++	sa.sa_flags = 0;
++	sa.sa_handler = finish;
++	sigaction(SIGCHLD, &sa, NULL);
+ 	child = fork();
+ 	if (child < 0) {
+-		perror("fork");
++		if (!force) perror("fork");
+ 		fail();
+ 	}
+ 	if (child == 0) {
+ 		subchild = child = fork();
+ 		if (child < 0) {
+-			perror("fork");
++			if (!force) perror("fork");
+ 			fail();
+ 		}
+-		if (child)
++		if (child) {
++			sa.sa_flags = SA_RESTART;
++			sigaction(SIGCHLD, &sa, NULL);
+ 			dooutput();
+-		else
++		} else
+ 			doshell(command);
+ 	}
++	sa.sa_handler = resize;
++	sa.sa_flags = SA_RESTART;
++	sigaction(SIGWINCH, &sa, NULL);
+ 	doinput();
+ 
+-	return 0;
++	return (0);
+ }
+ 
+ void
+@@ -195,6 +388,7 @@
+ #endif
+ 	while ((cc = read(0, ibuf, BUFSIZ)) > 0)
+ 		(void) write(master, ibuf, cc);
++	usleep(10); /* TODO ugly way to avoid a race condition */
+ 	done();
+ }
+ 
+@@ -203,20 +397,12 @@
+ void
+ finish()
+ {
+-#if defined(SVR4)
+ 	int status;
+-#else /* !SVR4 */
+-	union wait status;
+-#endif /* !SVR4 */
+ 	register int pid;
+-	register int die = 0;
+ 
+ 	while ((pid = wait3((int *)&status, WNOHANG, 0)) > 0)
+ 		if (pid == child)
+-			die = 1;
+-
+-	if (die)
+-		done();
++			break;
+ }
+ 
+ struct linebuf {
+@@ -250,8 +436,8 @@
+     }
+ }
+ 
+-void
+-check_output(const char *str, int len)
++static void
++uu_check_output(const char *str, int len)
+ {
+     static struct linebuf lbuf = {"", 0};
+     int i;
+@@ -276,11 +462,45 @@
+     }
+ }
+ 
++static int
++check_output(char *str, int len)
++{
++	char *p;
++
++	/* If we see query string, remove it */
++	/* ESC [ > 0 c : Send Device Attributes */
++	if (len >= 5 && (p = strstr(str, "\e[>0c")) != NULL) {
++		if (len == 5)
++			return (0);
++		memmove(p, p + 5, len - 5 + 1 -(p - str));
++		return (len - 5);
++	}
++
++	return (len);
++}
++
++void
++dowrites(Header h, int cc, char *obuf) {
++
++	if ((cc = check_output(obuf, cc))) {
++		(void) write_header(fscript, &h);
++		/* (void) fwrite(obuf, 1, cc, fscript); */
++		fencrypt(obuf, cc, fscript, 1);
++	}
++}
++
+ void
+ dooutput()
+ {
+ 	int cc;
++	int tmpOutBytes;
++	int lcc = 0;
+ 	char obuf[BUFSIZ];
++	char lobuf[BUFSIZ];
++	time_t lastsec = 0;
++	int readsec = 0;
++	Header h;
++	Header lh;
+ 
+ 	setbuf(stdout, NULL);
+ 	(void) close(0);
+@@ -288,18 +508,45 @@
+ 	(void) close(slave);
+ #endif
+ 	for (;;) {
+-		Header h;
+ 
+ 		cc = read(master, obuf, BUFSIZ);
+-		if (cc <= 0)
++		if (cc <= 0) {
++			if (lcc) {
++				/* do the last chunk of ignored data */
++				dowrites(lh, lcc, lobuf);
++				lcc = 0;
++			}
+ 			break;
++		}
+ 		if (uflg)
+-		    check_output(obuf, cc);
++			uu_check_output(obuf, cc);
+ 		h.len = cc;
+ 		gettimeofday(&h.tv, NULL);
+ 		(void) write(1, obuf, cc);
+-		(void) write_header(fscript, &h);
+-		(void) fwrite(obuf, 1, cc, fscript);
++		if (limit) {
++			if (h.tv.tv_sec == lastsec) {
++				if (readsec >= limit) {
++					/*
++					 * TODO: avoid this by cycling
++					 * between two buffers
++					 */
++					strncpy(lobuf, obuf, BUFSIZ);
++					lcc = cc;
++					lh = h;
++					continue;
++				}
++				readsec += cc;
++			} else {
++				if (lcc) {
++					/* do the last chunk of ignored data */
++					dowrites(lh, lcc, lobuf);
++					lcc = 0;
++				}
++				lastsec = h.tv.tv_sec;
++				readsec = cc;
++			}
++		}
++		dowrites(h, cc, obuf);
+ 	}
+ 	done();
+ }
+@@ -317,18 +564,16 @@
+ 	}
+ 	***/
+ 	getslave();
++
++	utmpx_update();
++
+ 	(void) close(master);
+ 	(void) fclose(fscript);
+ 	(void) dup2(slave, 0);
+ 	(void) dup2(slave, 1);
+ 	(void) dup2(slave, 2);
+ 	(void) close(slave);
+-
+-	if (!command) {
+-		execl(shell, strrchr(shell, '/') + 1, "-i", 0);
+-	} else {
+-		execl(shell, strrchr(shell, '/') + 1, "-c", command, 0);	
+-	}
++	spawnshell();
+ 	perror(shell);
+ 	fail();
+ }
+@@ -340,6 +585,9 @@
+ 
+ 	rtt = tt;
+ #if defined(SVR4)
++#if !defined(XCASE)
++#define	XCASE		0
++#endif
+ 	rtt.c_iflag = 0;
+ 	rtt.c_lflag &= ~(ISIG|ICANON|XCASE|ECHO|ECHOE|ECHOK|ECHONL);
+ 	rtt.c_oflag = OPOST;
+@@ -360,6 +608,10 @@
+ fail()
+ {
+ 
++	if (force) {
++		spawnshell();
++		perror(shell);
++	}
+ 	(void) kill(0, SIGTERM);
+ 	done();
+ }
+@@ -367,6 +619,7 @@
+ void
+ done()
+ {
++
+ 	if (subchild) {
+ 		(void) fclose(fscript);
+ 		(void) close(master);
+@@ -383,7 +636,7 @@
+ 	(void) tcgetattr(0, &tt);
+ 	(void) ioctl(0, TIOCGWINSZ, (char *)&win);
+ 	if ((master = open("/dev/ptmx", O_RDWR)) < 0) {
+-		perror("open(\"/dev/ptmx\", O_RDWR)");
++		if (!force) perror("open(\"/dev/ptmx\", O_RDWR)");
+ 		fail();
+ 	}
+ #else /* !SVR4 */
+@@ -397,7 +650,7 @@
+ #else
+ #ifdef HAVE_getpt
+ 	if ((master = getpt()) < 0) {
+-		perror("getpt()");
++		if (!force) perror("getpt()");
+ 		fail();
+ 	}
+ #else
+@@ -446,32 +699,34 @@
+ 	grantpt( master);
+ 	unlockpt(master);
+ 	if ((slave = open((const char *)ptsname(master), O_RDWR)) < 0) {
+-		perror("open(fd, O_RDWR)");
++		if (!force) perror("open(fd, O_RDWR)");
+ 		fail();
+ 	}
+ 	if (isastream(slave)) {
+ 		if (ioctl(slave, I_PUSH, "ptem") < 0) {
+-			perror("ioctl(fd, I_PUSH, ptem)");
++			if (!force) perror("ioctl(fd, I_PUSH, ptem)");
+ 			fail();
+ 		}
+ 		if (ioctl(slave, I_PUSH, "ldterm") < 0) {
+-			perror("ioctl(fd, I_PUSH, ldterm)");
++			if (!force) perror("ioctl(fd, I_PUSH, ldterm)");
+ 			fail();
+ 		}
+ #ifndef _HPUX_SOURCE
+ 		if (ioctl(slave, I_PUSH, "ttcompat") < 0) {
+-			perror("ioctl(fd, I_PUSH, ttcompat)");
++			if (!force) perror("ioctl(fd, I_PUSH, ttcompat)");
+ 			fail();
+ 		}
+ #endif
+-		(void) ioctl(0, TIOCGWINSZ, (char *)&win);
+ 	}
++	(void) tcsetattr(slave, TCSAFLUSH, &tt);
++	(void) ioctl(slave, TIOCSWINSZ, (char *)&win);
++	(void) ioctl(slave, TIOCSCTTY, 0);
+ #else /* !SVR4 */
+ #ifndef HAVE_openpty
+ 	line[strlen("/dev/")] = 't';
+ 	slave = open(line, O_RDWR);
+ 	if (slave < 0) {
+-		perror(line);
++		if (!force) perror(line);
+ 		fail();
+ 	}
+ 	(void) tcsetattr(slave, TCSAFLUSH, &tt);
+@@ -481,3 +736,184 @@
+ 	(void) ioctl(slave, TIOCSCTTY, 0);
+ #endif /* SVR4 */
+ }
++
++void
++spawnshell()
++{
++	force = 0;
++
++	if (!command) {
++		execl(shell, strrchr(shell, '/') + 1, "-i", NULL);
++	} else {
++		execl(shell, strrchr(shell, '/') + 1, "-c", command, NULL);
++	}
++}
++
++void
++drop_priv()
++{
++
++	/******** drop privileges here *********/
++	gid_t newgid = getgid(), oldgid = getegid();
++	uid_t newuid = getuid(), olduid = geteuid();
++
++	orig_gid = oldgid;
++	orig_uid = olduid;
++	orig_ngroups = getgroups(NGROUPS_MAX, orig_groups);
++
++	/* If root privileges are to be dropped, be sure to pare down the ancillary
++	 * groups for the process before doing anything else because the setgroups()
++	 * system call requires root privileges.  Drop ancillary groups regardless of
++	 * whether privileges are being dropped temporarily or permanently.
++	 */
++	if (!olduid)
++		setgroups(1, &newgid);
++
++	if (newgid != oldgid) {
++		setegid(newgid);
++	}
++	if (newuid != olduid) {
++		seteuid(newuid);
++	}
++
++	/* verify that the changes were successful */
++	if (newgid != oldgid && getegid() != newgid) {
++		fprintf(stderr, "Fail\n");
++		abort();
++	}
++	if (newuid != olduid && geteuid() != newuid) {
++		fprintf(stderr, "Fail\n");
++		abort();
++	}
++	/*******************/
++}
++
++void
++restore_priv()
++{
++
++	if (geteuid(  ) != orig_uid) {
++		if (seteuid(orig_uid) == -1 || geteuid() != orig_uid) {
++			fprintf(stderr, "Fail\n");
++			abort();
++		}
++	}
++	if (getegid(  ) != orig_gid) {
++		if (setegid(orig_gid) == -1 || getegid() != orig_gid) {
++			fprintf(stderr, "Fail\n");
++			abort();
++		}
++	}
++	if (!orig_uid)
++		setgroups(orig_ngroups, orig_groups);
++}
++
++void
++runcommand(char *cmd)
++{
++	char cmd_buf[1024] = { 0 };
++	strncpy(cmd_buf, cmd, sizeof(cmd_buf));
++
++	char *args[128] = { NULL };
++
++	char *strtok_state = NULL;
++	args[0] = strtok_r(cmd_buf, " ", &strtok_state);
++
++	int current_arg_idx;
++	for (current_arg_idx = 1; current_arg_idx < 128; ++current_arg_idx) {
++		char *current_arg = strtok_r(NULL, " ", &strtok_state);
++		if (current_arg == NULL) {
++			break;
++		}
++
++		args[current_arg_idx] = current_arg;
++	}
++	execvp(args[0], args);
++}
++
++char *
++make_id(char *tty)
++{
++	char *res = tty;
++
++	if (strncmp (res, "pts/", 4) == 0)
++		res += 4;
++	if (strncmp (res, "tty", 3) == 0)
++		res += 3;
++	return (res);
++}
++
++char *
++clean_ttyname(char *tty)
++{
++	char *res = tty;
++
++	if (strncmp (res, _PATH_DEV, strlen(_PATH_DEV)) == 0)
++		res += strlen(_PATH_DEV);
++	if (strncmp (res, "pty/", 4) == 0)
++		res += 4;
++	if (strncmp (res, "ptym/", 5) == 0)
++		res += 5;
++	return (res);
++}
++
++void
++utmpx_update()
++{
++	int pid = getpid();
++	struct utmpx utmpx;
++	struct timeval tv;
++	char *clean_tty;
++	char *user = NULL;
++	char *host = NULL;
++	char *line;
++	char *tmp;
++	int err;
++/*
++	if (ptsname_r(master, line, sizeof(line)) != 0) {
++		fprintf(stderr, "Fail\n");
++		abort();
++	}
++*/
++	tmp = ptsname(master);
++	line = strdup(tmp);
++
++	/*
++	 * Create utmp entry for child
++	 */
++	clean_tty = clean_ttyname(line);
++	memset(&utmpx, 0, sizeof(utmpx));
++	user = getenv("USER");
++	if (user == NULL)
++		user = "ttyrec";
++	strncpy(utmpx.ut_user,  user, sizeof(utmpx.ut_user));
++	strncpy(utmpx.ut_line,  clean_tty, sizeof(utmpx.ut_line));
++	host = getenv("SSH_CLIENT");
++	if (host == NULL)
++		host = "127.0.0.1";
++	else {
++		/* get IP */
++		tmp = host;
++		while (*tmp != ' ') {
++			tmp++;
++		}
++		if (*tmp == ' ')
++			*tmp = '\0';
++	}
++	strncpy(utmpx.ut_host,  host, sizeof(utmpx.ut_host));
++
++	strncpy(utmpx.ut_id, make_id(clean_tty), sizeof(utmpx.ut_id));
++
++	utmpx.ut_pid = pid;
++
++	utmpx.ut_type = USER_PROCESS;
++
++	gettimeofday (&tv, NULL);
++	utmpx.ut_tv.tv_sec = tv.tv_sec;
++	utmpx.ut_tv.tv_usec = tv.tv_usec;
++
++	restore_priv();
++	if (pututxline(&utmpx) == NULL)
++		fprintf(stderr, "pututxline failed");
++	drop_priv();
++}
+diff -uwN ttyrec/ttyrec.h ttyrec-mod/ttyrec.h
+--- ttyrec/ttyrec.h	2017-09-19 11:05:54.000000000 +0900
++++ ttyrec-mod/ttyrec.h	2017-09-20 11:53:25.603946000 +0900
+@@ -8,5 +8,4 @@
+     int len;
+ } Header;
+ 
+-
+ #endif
+diff -uwN ttyrec/ttyw-play ttyrec-mod/ttyw-play
+--- ttyrec/ttyw-play	1970-01-01 07:00:00.000000000 +0700
++++ ttyrec-mod/ttyw-play	2017-09-20 11:33:02.000000000 +0900
+@@ -0,0 +1,39 @@
++#!/bin/sh
++
++# This is sample script that decrypts
++# ttyrec file and plays it using
++# ttyplay.
++
++# This gets last ttyrec file
++my_host=`hostname`
++last_date=`date +%Y-%m-%d`
++recfile=`ls /var/rec | grep ${my_host}-${last_date} | tail -2 | head -n 1`
++echo "Last ttyrec file: $recfile"
++
++file=`echo $recfile | cut -d. -f1`
++#echo "File without extention: $file"
++
++# This is the key file
++recfilekey=${file}.ttyrec.key
++echo "Key file: $recfilekey"
++
++# This decrypts encrypted key file
++openssl rsautl -decrypt -inkey /usr/local/etc/ssl/test_private.pem -in /var/rec/${recfilekey} -out /tmp/ttyreckey.bin
++
++key=`cat /tmp/ttyreckey.bin`
++
++echo "Decrypting using key ${key} ... "
++
++# This will decrypt ecnrypted ttyrec file using key
++# Decrypted ttyrec file will be stored as ttyrec-dec.txt file (hardcoded) in current directory
++./ttydecrypt /var/rec/${recfile} ${key}
++
++echo "Playing ... "
++echo
++./ttyplay ttyrec-dec.txt
++
++echo
++
++echo "Done."
++
++echo
