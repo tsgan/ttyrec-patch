@@ -1,4 +1,3 @@
-Common subdirectories: ttyrec/.git and ttyrec-mod/.git
 diff -uwN ttyrec/Makefile ttyrec-mod/Makefile
 --- ttyrec/Makefile	2017-09-19 11:05:54.000000000 +0900
 +++ ttyrec-mod/Makefile	2017-09-20 11:44:22.681482000 +0900
